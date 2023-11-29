@@ -1,0 +1,262 @@
+---
+title: "Project"
+output: html_document
+date: "2023-06-30"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(caret)
+library(tidyverse)
+library(tidytext)
+library(quanteda)
+library(quanteda.textstats)
+library(quanteda.textmodels)
+library(magrittr)
+library(dplyr)
+library(e1071)
+library(readr)
+```
+
+## Read the ecommerce dataset and assign the column names "Label" and "Description"
+```{r cars}
+ecom_data = read_csv('ecommerceDataset.csv', col_names=c("Label","Description"),show_col_types = FALSE)
+head(ecom_data)
+```
+## Check for missing data and remove if needed.
+```{r cars}
+missing_values <- is.na(ecom_data)
+missing_counts <- colSums(missing_values)
+print(missing_counts)
+```
+## 1 description text found empty and removed.
+```{r cars}
+ecom_data <- ecom_data[!is.na(ecom_data$Description), ]
+ecom_data <- subset(ecom_data, nchar(Description) > 0)
+```
+
+## Check the distribution of data in Labels
+```{r pressure, echo=FALSE}
+ecom_df <- data.frame(ecom_data)
+counts <- count(ecom_df, Label)
+print(counts)
+```
+
+## Check the distribution of data in Labels
+```{r pressure, echo=FALSE}
+ecom_df_prop <- data.frame(ecom_data) %>% count(Label) %>%
+    mutate(freq=n/sum(n))
+print(ecom_df_prop)
+```
+
+## Split the data into training (80%) and test (20%) sets. Training set will be used to train the model and test set will be used for performance evaluation of the model.
+```{r pressure, echo=FALSE}
+set.seed(123)
+trainIndex <- createDataPartition(ecom_data$Label, p = .8, list = FALSE, times = 1)
+train_data <- ecom_data[trainIndex,]
+test_data <- ecom_data[-trainIndex,]
+
+#docvars(corp, "id_numeric") <- 1:ndoc(corp)
+#dfmat_train <- corpus_subset(corp, id_numeric %in% trainIndex) %>% tokens() %>% dfm() %>% dfm_weight(scheme="boolean")
+#dfmat_test <- corpus_subset(corp, !(id_numeric %in% trainIndex)) %>% tokens %>% dfm() %>% dfm_weight(scheme="boolean")
+```
+
+
+## Create a corpus of the description and Preprocess the corpus
+```{r pressure, echo=FALSE}
+train_corp <- corpus(train_data$Description)
+test_corp <- corpus(test_data$Description)
+df_training <- tokens(train_corp, what = "word",
+               remove_numbers = TRUE, remove_punct = TRUE, 
+               remove_symbols = TRUE) %>%
+                tokens_tolower()  %>% 
+                tokens_remove(stopwords("en")) %>%
+                tokens_wordstem(language = "english")%>%
+                dfm()
+df_test <- tokens(test_corp, what = "word",
+               remove_numbers = TRUE, remove_punct = TRUE, 
+               remove_symbols = TRUE) %>%
+                tokens_tolower()  %>% 
+                tokens_remove(stopwords("en")) %>%
+                tokens_wordstem(language = "english")%>%
+                dfm()
+
+```
+
+## Train the Naive Bayes Model
+```{r pressure, echo=FALSE}
+train_nb <- textmodel_nb(df_training, train_data$Label)
+summary(train_nb) 
+```
+
+## Naive Bayes can only take features into consideration that occur both in the training set and the test set. We can make the features identical using dfm_match().
+## Use confusionmatrix to check the model performance.
+```{r pressure, echo=FALSE}
+df_matched <- dfm_match(df_test, features = featnames(df_training))
+actual_class <- test_data$Label
+predicted_class <- predict(train_nb, newdata = df_matched)
+tab_class <- table(actual_class, predicted_class)
+tab_class
+
+confusionMatrix(tab_class, mode = "everything")
+```
+## Test Naive Bayes model on new sentences
+```{r pressure, echo=FALSE}
+new_sentences <- c("I love the book Book thief. It is the best.", 
+               "This dress was bigger so had to return it.", 
+               "Love the phone. It works great.", 
+               "best coffee maker.", 
+               "The chairs were not as pictured.", 
+               "The curtains were perfect.", 
+               "Lovely chinaware. Will buy again", 
+               "The bath robes were a gift and was a hit.", 
+               "The flowers are great. They look real")
+newdesc <- data.frame(new_sentences)
+new_corpus <- corpus(newdesc$new_sentences)
+dfmat_newcorpus <- dfm(new_corpus)
+
+df_matchednew <- dfm_match(dfmat_newcorpus, features = featnames(df_training))
+predictions <- predict(train_nb, newdata = df_matchednew)
+print(predictions)
+```
+
+## Train Random Forest Model. Perform SVD. Specifically, reduce dimensionality down to 300 columns for our latent semantic analysis (LSA).
+```{r pressure, echo=FALSE}
+library(irlba)
+library(doSNOW)
+library(randomForest)
+
+ecom_data$Label <- as.factor(ecom_data$Label)
+trainIndex <- createDataPartition(ecom_data$Label, p = .8, list = FALSE, times = 1)
+train_data <- ecom_data[trainIndex,]
+test_data <- ecom_data[-trainIndex,]
+
+train_token <- tokens(train_data$Description, what = "word", 
+                       remove_numbers = TRUE, remove_punct = TRUE,
+                       remove_symbols = TRUE) %>% 
+                       tokens_tolower()
+
+train_dfm<-train_token %>%
+  tokens_remove(stopwords(source = "smart")) %>%
+  tokens_wordstem() %>%
+  dfm() %>% 
+    dfm_trim( min_termfreq = 10, min_docfreq = 2) %>% 
+    dfm_tfidf()
+
+train_df <- cbind(Label = train_data$Label, data.frame(train_dfm))
+
+## Use caret to create stratified folds for 10-fold cross validation repeated
+## 2 times (i.e., create 20 random stratified samples)
+ set.seed(48743)
+ cv.folds <- createMultiFolds(train_data$Label, k = 5, times = 2)
+# # basically this will create 20 random stratified samples
+##
+ cv.cntrl <- trainControl(method = "repeatedcv", number = 5,
+                          repeats = 2, index = cv.folds)
+ 
+ train.lsa <- irlba(t(train_dfm), nv = 300, maxit = 600)
+
+# Take a look at the new feature data up close.
+# View(train.lsa$v)
+
+ train_svd <- data.frame(Label = train_data$Label, train.lsa$v)
+# Time the code execution
+ start.time <- Sys.time()
+
+# Create a cluster to work on 4 logical cores.
+ cl <- makeCluster(4, type = "SOCK")
+ registerDoSNOW(cl) # register the instance
+
+ rf1 <- train(Label ~ ., data = train_svd,
+                     method = "rf",
+                     ntree = 100,
+                     trControl = cv.cntrl, tuneLength = 5,
+                     importance = TRUE)
+
+## Processing is done, stop cluster.
+ stopCluster(cl)
+## Total time of execution
+ total.time <- Sys.time() - start.time
+ total.time
+
+ rf1
+ str(rf1, max.level = 1)
+
+ rf1$finalModel
+
+##  Let's drill-down on the results.
+ confusionMatrix(train_svd$Label, rf1$finalModel$predicted)
+
+```
+
+## Test the performance of the Random forest model on the test holdout dataset.
+```{r pressure, echo=FALSE}
+test_token <- tokens(test_data$Description, what = "word",
+                        remove_numbers = TRUE, remove_punct = TRUE,
+                        remove_symbols = TRUE) %>%
+                        tokens_tolower()
+
+ test_dfm<-test_token %>%
+   tokens_remove(stopwords(source = "smart")) %>%
+   tokens_wordstem() %>%
+   dfm() %>%
+     dfm_tfidf() %>%
+     dfm_trim( min_termfreq = 10, min_docfreq = 2)
+ 
+ test_dfm <- dfm_match(test_dfm, featnames(train_dfm))
+ test_matrix <- as.matrix(test_dfm)
+ test_dfm
+
+ sigma.inverse <- 1 / train.lsa$d # taking the tranpose of the singular matrix is # same as calculating it's inverse
+ u.transpose <- t(train.lsa$u)#transpose of the term matrix
+ test_svd <- t(sigma.inverse * u.transpose %*% t(test_dfm))
+ test_svd<-as.matrix(test_svd)
+ test_svd <- data.frame(Label = test_data$Label, test_svd)
+
+ preds <- predict(rf1, test_svd)
+ confusionMatrix(preds, test_svd$Label)
+```
+
+```{r pressure, echo=FALSE}
+## Test Random Forest model on new sentences
+# # Define a set of possible sentences for the reviews
+# #new_sentences <- c("I love the book Book thief. It is the best.", 
+#                #"This dress was bigger so had to return it.", 
+#                #"Love the phone. It works great.", 
+#                "best coffee maker.", 
+#                "The chairs were not as pictured.", 
+#                "The curtains were perfect.", 
+#                "Lovely chinaware. Will buy again", 
+#                "The bath robes were a gift and was a hit.", 
+#                "The flowers are great. They look real")
+# #new_corpus <- corpus(new_sentences)
+# #new_token <- tokens(new_corpus, what = "word",
+#                     remove_numbers = TRUE, remove_punct = TRUE,
+#                     remove_symbols = TRUE) %>%
+#   tokens_tolower() %>%
+#   tokens_remove(stopwords(source = "smart")) %>%
+#   tokens_wordstem()
+# 
+# # Create a document-feature matrix (DFM) for the new data
+# new_dfm <- dfm(new_token) %>%
+#   dfm_tfidf() %>%
+#   dfm_trim(min_termfreq = 10, min_docfreq = 2)
+# 
+# # Make sure the feature names of new_dfm match with the training data
+# new_dfm <- dfm_match(new_dfm, featnames(train_dfm))
+# 
+# # Perform LSA transformation (similar to what you did for training data)
+# sigma.inverse <- 1 / train.lsa$d
+# u.transpose <- t(train.lsa$u)
+# new_svd <- t(sigma.inverse * u.transpose %*% t(new_dfm))
+# new_svd <- as.matrix(new_svd)
+# 
+# # Make predictions using the rf1 model
+# preds <- predict(rf1$finalModel, newdata = new_svd)
+# 
+# # Display the predictions
+# print(preds)
+```
+
+
+
